@@ -528,6 +528,83 @@ describe('LifecycleController Lifecycle & Safeguards (Findings 4, 6, 7)', functi
 
         assert.strictEqual(replacementStarted, false, 'Must not start replacement while old process is alive');
     });
+
+    it('rejects replacement and preserves process ownership when initialization timeout fails to terminate process', async () => {
+        let replacementStarted = false;
+        const stubbornProc: any = {
+            pid: 888888,
+            exitCode: null,
+            kill: () => {},
+            once: () => {},
+            removeListener: () => {},
+        };
+
+        const clientManager = new LifecycleController<any>(
+            () => {
+                return {
+                    state: 2, // Starting
+                    _serverProcess: stubbornProc,
+                    start: () => new Promise<never>(() => {}), // Stalls indefinitely
+                    stop: async () => {},
+                    dispose: async () => {},
+                };
+            },
+            { initTimeoutMs: 50, stopTimeoutMs: 50 }
+        );
+
+        const origKill = process.kill;
+        try {
+            (process as any).kill = (pid: number, signal?: any) => {
+                if (pid === 888888) {
+                    return true;
+                }
+                return origKill(pid, signal);
+            };
+
+            // 1. Initial start must reject because of initialization timeout AND termination failure
+            await assert.rejects(
+                () => clientManager.start('/bin/kubescape-stalled'),
+                /failed to terminate/i
+            );
+
+            // 2. Ownership of stubbornProc must be preserved in currentProcess
+            assert.strictEqual(
+                (clientManager as any).currentProcess,
+                stubbornProc,
+                'Process ownership must be preserved when initialization timeout fails to terminate process'
+            );
+
+            // 3. Swap clientFactory to simulate an attempt to start a healthy replacement
+            (clientManager as any).clientFactory = () => {
+                replacementStarted = true;
+                return {
+                    state: 3,
+                    start: async () => {},
+                    stop: async () => {},
+                    dispose: async () => {},
+                };
+            };
+
+            // 4. Subsequent restart MUST be rejected because old process is still alive
+            await assert.rejects(
+                () => clientManager.restart('/bin/kubescape-replacement'),
+                /Cannot safely start or replace the server while the old process remains alive/i
+            );
+
+            // 5. Verify replacement server NEVER started
+            assert.strictEqual(replacementStarted, false, 'Replacement server must not start while stubborn process is alive');
+
+            // 6. Verify disposal does NOT silently lose the process handle
+            assert.doesNotThrow(() => clientManager.dispose());
+            assert.strictEqual(
+                (clientManager as any).currentProcess,
+                stubbornProc,
+                'Disposal must preserve process handle if it cannot be terminated'
+            );
+        } finally {
+            process.kill = origKill;
+        }
+    });
 });
 
 describe('Language Client Lifecycle Controller & Queue Tests', () => {

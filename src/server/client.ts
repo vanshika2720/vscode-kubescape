@@ -215,8 +215,9 @@ export class KubescapeLanguageClientManager implements vscode.Disposable {
                 );
 
                 const proc = getChildProcess(client) || this.currentProcess;
+                let terminated = true;
                 if (proc) {
-                    await terminateProcess(proc, 3000);
+                    terminated = await terminateProcess(proc, Math.max(200, this.stopTimeoutMs));
                 }
 
                 startPromise.catch(() => {});
@@ -225,6 +226,16 @@ export class KubescapeLanguageClientManager implements vscode.Disposable {
                     await client.dispose();
                 } catch {
                     // Ignore dispose failure on timed-out client
+                }
+
+                if (!terminated && proc && proc.pid) {
+                    this.currentProcess = proc;
+                    this.client = null;
+                    this.currentExecutablePath = null;
+                    throw new Error(
+                        `Kubescape Language Server initialization timed out after ${this.initTimeoutMs}ms, ` +
+                        `and the process (PID ${proc.pid}) failed to terminate. Cannot safely start or replace the server while the process remains alive.`
+                    );
                 }
 
                 this.client = null;
@@ -239,8 +250,25 @@ export class KubescapeLanguageClientManager implements vscode.Disposable {
             this.outputChannel.appendLine(`[LSP] Failed to start language server: ${err?.message || err}`);
 
             const proc = getChildProcess(client) || this.currentProcess;
+            let terminated = true;
             if (proc) {
-                await terminateProcess(proc, 2000);
+                terminated = await terminateProcess(proc, Math.max(200, this.stopTimeoutMs));
+            }
+
+            try {
+                await client.dispose();
+            } catch {
+                // Ignore dispose failure
+            }
+
+            if (!terminated && proc && proc.pid) {
+                this.currentProcess = proc;
+                this.client = null;
+                this.currentExecutablePath = null;
+                throw new Error(
+                    `Failed to start language server (${err?.message || err}), ` +
+                    `and the process (PID ${proc.pid}) failed to terminate. Cannot safely start or replace the server while the process remains alive.`
+                );
             }
 
             this.client = null;
@@ -286,7 +314,7 @@ export class KubescapeLanguageClientManager implements vscode.Disposable {
                 this.outputChannel.appendLine(
                     `[LSP] Process PID ${proc.pid} did not exit after shutdown signal. Forcing termination...`
                 );
-                const forceExited = await terminateProcess(proc, 3000);
+                const forceExited = await terminateProcess(proc, Math.max(200, this.stopTimeoutMs));
                 if (!forceExited) {
                     this.currentProcess = proc;
                     throw new Error(

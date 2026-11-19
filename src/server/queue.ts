@@ -205,8 +205,9 @@ export class LifecycleController<TClient extends ILifecycleClient> {
                 );
 
                 const proc = extractChildProcess(client) || this.currentProcess;
+                let terminated = true;
                 if (proc) {
-                    await terminateProcess(proc, 3000);
+                    terminated = await terminateProcess(proc, Math.max(200, this.stopTimeoutMs));
                 }
 
                 startPromise.catch(() => {});
@@ -215,6 +216,16 @@ export class LifecycleController<TClient extends ILifecycleClient> {
                     await client.dispose();
                 } catch {
                     // Ignore dispose failure on timed-out client
+                }
+
+                if (!terminated && proc && proc.pid) {
+                    this.currentProcess = proc;
+                    this.client = null;
+                    this.currentExecutablePath = null;
+                    throw new Error(
+                        `Kubescape Language Server initialization timed out after ${this.initTimeoutMs}ms, ` +
+                        `and the process (PID ${proc.pid}) failed to terminate. Cannot safely start or replace the server while the process remains alive.`
+                    );
                 }
 
                 this.client = null;
@@ -229,8 +240,25 @@ export class LifecycleController<TClient extends ILifecycleClient> {
             this.log(`[LSP] Client failed to start: ${err?.message || err}`);
 
             const proc = extractChildProcess(client) || this.currentProcess;
+            let terminated = true;
             if (proc) {
-                await terminateProcess(proc, 2000);
+                terminated = await terminateProcess(proc, Math.max(200, this.stopTimeoutMs));
+            }
+
+            try {
+                await client.dispose();
+            } catch {
+                // Ignore dispose failure
+            }
+
+            if (!terminated && proc && proc.pid) {
+                this.currentProcess = proc;
+                this.client = null;
+                this.currentExecutablePath = null;
+                throw new Error(
+                    `Failed to start language server (${err?.message || err}), ` +
+                    `and the process (PID ${proc.pid}) failed to terminate. Cannot safely start or replace the server while the process remains alive.`
+                );
             }
 
             this.client = null;
@@ -298,6 +326,8 @@ export class LifecycleController<TClient extends ILifecycleClient> {
         }
         this.isDisposed = true;
         this.queue.dispose();
-        void this.internalStop();
+        void this.internalStop().catch((err) => {
+            this.log(`[LSP Error] Error during disposal: ${err?.message || err}`);
+        });
     }
 }
